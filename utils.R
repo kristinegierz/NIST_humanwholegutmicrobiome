@@ -1,6 +1,6 @@
 ## Helper Functions Required - METAGENOMICS
 ## Author: Kristine Gierz
-## Date: Aug 20, 2024
+## Date: 02/09/2023
 
 ## This file has all helper functions needed for the analysis.
 
@@ -34,32 +34,92 @@ bayes_restructure <- function(data) {
     mutate(vial = dense_rank(box))                  # Renumber the boxes to vials
 }
 
+# We need this for the pairwise comparisons
 rename_pair <- function(df) {
   # Split the pair into components and create a new column with renamed pairs
   df <- df %>%
     mutate(
-      new_pair = paste0("D", day, "B", box)
+      new_pair = paste0("B", box, "R", rep)
     )
   
   # Sort the unique pairs
   sorted_unique_pairs <- df %>%
-    mutate(day = as.numeric(day)) %>%
-    distinct(day, box, new_pair) %>%
-    arrange(day, box) %>%
+    distinct(box, rep, new_pair) %>%
+    arrange(box, rep) %>%
     pull(new_pair)
   
   # Convert new_pair to a factor with the levels in the sorted order
   df <- df %>%
     mutate(group = factor(new_pair,
-                          levels = sorted_unique_pairs)) %>%
-    select(-day, -box, -new_pair, -vial) # Remove the temporary columns
+                             levels = sorted_unique_pairs)) %>%
+    select(-box, -rep, -new_pair, -vial) # Remove the temporary columns
   
   return(df)
 }
 
-# ---- Pairwise Differences Helpers ----
+# ---- STAN model helpers ----
 
-# Function to calculate pairwise differences and include day/vial information
+# Define a function to extract the desired element and calculate the stats
+extract_element_stats <- function(file_path, element_name) {
+  # Read the Rds file
+  result <- readRDS(file_path)
+  
+  # Check if the result is a list with two elements
+  if (is.list(result) && length(result) == 2) {
+    result <- result[[1]]
+  }
+  
+  # Extract desired element
+  element <- result[[element_name]]
+  
+  # Calculate mean and 95% credible interval
+  mean_element <- mean(element)
+  lower_element <- quantile(element, 0.025)
+  upper_element <- quantile(element, 0.975)
+  
+  return(c(mean = mean_element, lower = lower_element, upper = upper_element))
+}
+
+# ---- Saving Bayesian Model Helper ----
+
+# Function to fit the Stan model and save results
+fit_and_save <- function(data, asv_id, group, model_code) {
+  
+  # Prepare data for Stan
+  stan_data <- list(
+    N = nrow(data),
+    J = length(unique(data$vial)),
+    K = length(unique(data$replicate)),
+    vial = data$vial,
+    y = data$rel_abund
+  )
+  
+  # Set a fixed random seed for reproducibility
+  set.seed(1234)
+  
+  path <- paste0(directory_path, "stan_models/", group, "/")
+  
+  # Compile the model
+  stan_model_obj <- stan_model(model_code = model_code)
+  
+  # Fit the model
+  fit <- sampling(stan_model_obj, data = stan_data, iter = 100000, chains = 4)
+  # print(fit) 
+  # Specify the name for the .Rds file
+  rds_file <- paste0(path, "models/", "stan_model_asv_", asv_id, ".Rds")
+  
+  # Save the fitted model object to an .Rds file
+  saveRDS(fit, file = rds_file)
+  # 
+  # Extract and save the results
+  results <- rstan::extract(fit)
+  results_file <- paste0(path, "results/", "stan_results_asv_", asv_id, ".Rds")
+  saveRDS(results, file = results_file)
+  # print(fit)
+}
+
+# ---- Pairwise analysis helpers ----
+
 pairwise_diff_with_pairs <- function(df, epsilon = 1e-6) {
   # Ensure there are at least two observations to compare
   if(nrow(df) < 2) {
@@ -78,23 +138,23 @@ pairwise_diff_with_pairs <- function(df, epsilon = 1e-6) {
     i2 <- indices[2]
     value1 <- df$rel_abund[i1] 
     value2 <- df$rel_abund[i2] 
-    
+    # abs(max(log(value1), log(value2))/min(log(value1), log(value2)) - 1)
+
     percent_difference <- ifelse(value1 == 0 & value2 == 0, 0,
-                                 abs((log(value1) - log(value2))/
-                                       (log(value1) + log(value2)) ))
+                                 abs((log(value1) - log(value2)))/
+                                       abs((log(value1) + log(value2)))
+                                 )
     
     data.frame(
-      pair1 = paste(df$day[i1], df$vial[i1],
+      pair1 = paste(df$vial[i1], df$replicate[i1],
                     sep = "_"),
-      pair2 = paste(df$day[i2], df$vial[i2],
+      pair2 = paste(df$vial[i2], df$replicate[i2],
                     sep = "_"),
       percent_diff = percent_difference
     )
   }, simplify = FALSE) %>%
     bind_rows()
 }
-
-# ---- Bootstrap Helpers ----
 
 # Function to calculate the CoD for a single bootstrap sample
 bootstrap_single_sample_cod <- function(data) {
