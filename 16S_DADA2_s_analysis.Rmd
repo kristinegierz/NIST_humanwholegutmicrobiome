@@ -1,0 +1,1025 @@
+---
+title: "16S_dada2_stability analysis"
+output: html_document
+---
+
+```{r Clear_variables}
+rm(list=ls())    # Clear variables; clear plots
+```
+
+```{r Load_packages_and_workspace}
+sapply(c('tidyverse','readxl','dada2', 'rmarkdown', 'knitr', 'Rcpp'), require, character.only = TRUE) # Load packages
+theme_set(theme_bw() + theme(plot.title = element_text(size = 11, face = 'bold', hjust = 0.5)))
+sessionInfo() 
+WD <- getwd()
+print(WD)
+load(paste0(WD, "/dada2_output/stability-workspace.RData"))
+
+```
+
+#Time points 1,2,3 corresponding to 1 week, 2 week, 4 weeks
+```{r T123_CUTADAPT_16S_primer_trimming}
+#timepoints1,2,3 were sequenced on the same run, Seq_run1 was completed on 06/26/2023
+# V4reads -- CUTADAPT
+
+#FWD: GTGYCAGCMGCCGCGGTAA
+#REV: G/GACTACNVGGGTWTCTAAT
+
+
+source(paste0(dirname(dirname(WD)), "/Resources/cutadapt_v4.R") )
+
+forward.reads <- sort(list.files(paste0(WD, "/T123/raw_reads"), pattern = "_R1_001.fastq.gz", full.names = TRUE)) 
+
+reverse.reads <- sort(list.files(paste0(WD, "/T123/raw_reads"), pattern = "_R2_001.fastq.gz", full.names = TRUE)) 
+
+sample.names <- sapply(strsplit(basename(forward.reads), "_"), `[`, 1)
+
+cutadapt("/usr/bin/cutadapt",
+         output.directory = paste0(WD, "/T123/primertrim_reads"),
+         forward.primer = "^GTGYCAGCMGCCGCGGTAA", 
+         reverse.primer = "^GACTACNVGGGTWTCTAAT", 
+         error.rate = 0.15,
+         minumum.overlap = 19,
+         clip.from.start.read1 = 0,
+         clip.from.start.read2 = 1,
+         maximum.N = 0,
+         discard.untrimmed = TRUE,
+         filter.pairs = "any",
+         log.files = TRUE,
+         R.cores = 4 )
+```
+
+```{r T123_plot_quality_profile}
+forward.reads <- sort(list.files(paste0(WD, "/T123/primertrim_reads"), pattern = "_R1_cutadapt.fastq.gz", full.names = TRUE)) 
+reverse.reads <- sort(list.files(paste0(WD, "/T123/primertrim_reads"), pattern = "_R2_cutadapt.fastq.gz", full.names = TRUE)) 
+
+# Quality Profiles of samples
+plotQualityProfile(forward.reads[1:8])          
+plotQualityProfile(reverse.reads[1:8])
+```
+
+```{r T123_DADA2_fliterAndTrim}
+
+filtFs <- file.path(paste0(WD, "/T123/Qtrim_reads"), paste0(sample.names, "_R1_filtered.fastq.gz"))
+filtRs <- file.path(paste0(WD, "/T123/Qtrim_reads"), paste0(sample.names, "_R2_filtered.fastq.gz"))
+
+out <- filterAndTrim(forward.reads, filtFs, reverse.reads, filtRs, 
+                     truncLen = c(200, 150),
+                     maxN = c(0, 0), 
+                     maxEE = c(5, 5), 
+                     truncQ = c(2,2),
+                     rm.phix = TRUE,
+                     compress = TRUE, 
+                     multithread = FALSE,
+                     verbose = TRUE)
+
+save.image(paste0(WD, "/dada2_output/stability-workspace.RData"))
+
+out %>% as.data.frame() %>%
+  dplyr::mutate(percent.surviving = round(reads.out/reads.in*100, 1))
+
+```
+
+```{r T123_DADA2_learnError_Fowardreads}
+errF <- learnErrors(filtFs, multithread = TRUE, randomize = TRUE, nbases = 2e8, verbose = TRUE)
+save.image(paste0(WD, "/dada2_output/stability-workspace.RData"))
+```
+
+```{r T123_DADA2_learnError_Reversereads}
+errR <- learnErrors(filtRs, multithread = TRUE, randomize = TRUE, nbases = 2e8, verbose = TRUE)
+save.image(paste0(WD, "/dada2_output/stability-workspace.RData"))
+```
+
+```{r T123_DADA2_plotErrors}
+plotErrors(errR, nominalQ = TRUE)
+plotErrors(errF, nominalQ = TRUE)
+```
+
+```{r T123_DADA2_derepFastq}
+
+filtFs <- sort(list.files(paste0(WD, "/T123/Qtrim_reads"), pattern = "_R1_filtered.fastq.gz", full.names = TRUE))
+filtRs <- sort(list.files(paste0(WD, "/T123/Qtrim_reads"), pattern = "_R2_filtered.fastq.gz", full.names = TRUE))
+
+sample.names <- sapply(strsplit(basename(filtFs), "_"), `[`, 1)
+
+derepFs <- derepFastq(filtFs, verbose = T)
+names(derepFs) <- sample.names
+save.image(paste0(WD, "/dada2_output/stability-workspace.RData"))
+
+derepRs <- derepFastq(filtRs, verbose = T)
+names(derepRs) <- sample.names
+save.image(paste0(WD, "/dada2_output/stability-workspace.RData"))
+```
+
+```{r T123_DADA2_dada_sequence_error_correction}
+dadaFs <- dada(derepFs, err = errF, multithread = TRUE, verbose = T)
+save.image(paste0(WD, "/dada2_output/stability-workspace.RData"))
+
+dadaRs <- dada(derepRs, err = errR, multithread = TRUE, verbose = T)
+save.image(paste0(WD, "/dada2_output/stability-workspace.RData"))
+```
+
+```{r T123_DADA2_mergePairs}
+mergers <- mergePairs(dadaFs, derepFs, dadaRs, derepRs, verbose = TRUE) 
+save.image(paste0(WD, "/dada2_output/stability-workspace.RData"))
+```
+
+```{r T123_DADA2_makeSequenceTable_removeBimera}
+seqtab <- makeSequenceTable(mergers)
+seqtab.nochim <- removeBimeraDenovo(seqtab, method = "consensus", multithread = TRUE, verbose = TRUE) 
+dim(seqtab.nochim)
+round(sum(seqtab.nochim)/sum(seqtab)*100, 2)
+table(nchar(getSequences(seqtab)))
+
+saveRDS(seqtab, paste0(WD, "/dada2_output/seqtab.rds"))
+save.image(paste0(WD, "/dada2_output/stability-workspace.RData"))
+```
+
+
+```{r T123_make_table_tracking_reads}
+getN <- function(x) sum(getUniques(x))
+if(nrow(filter(as.tibble(out), reads.in>0 & reads.out>0)) != nrow(as.tibble(out))) print("Some files didn't have reads.in or reads.out and have been drPped.")
+track <- cbind(filter(as.tibble(out), reads.in>0 & reads.out>0), sapply(dadaFs, getN), sapply(dadaRs, getN), sapply(mergers, getN), rowSums(seqtab.nochim))
+colnames(track) <- c("input", "filtered", "denoisedF", "denoisedR", "merged", "nonchimeric")
+track
+
+track %>%
+  rownames_to_column("ID") %>%
+  write.table(., paste0(WD, "/dada2_output/track.txt"),
+            quote = FALSE, row.names = FALSE)
+save.image(paste0(WD, "/dada2_output/stability-workspace.RData"))
+```
+
+#Time points 4,5  corresponding to 8 week, 12 week
+```{r T45_CUTADAPT_16S_primer_trimming}
+#Switched naming scheme to T8, 12 from T4 and T5 for weeks 8, 12
+#first seq run produced no usable results 08/21/23
+#split over two sequencing runs, all samples from the same time point were extracted at the same time, some issues with library prep resulting in low recovery lead to repeating some and running on a different run
+#seq_run2 run completed on 09/02/23
+#V4reads -- CUTADAPT
+
+#FWD: GTGYCAGCMGCCGCGGTAA
+#REV: G/GACTACNVGGGTWTCTAAT
+
+source(paste0(dirname(dirname(WD)), "/Resources/cutadapt_v4.R") )
+
+forward.reads <- sort(list.files(paste0(WD, "/T8-12-16/raw_reads"), pattern = "_R1_001.fastq.gz", full.names = TRUE)) 
+
+reverse.reads <- sort(list.files(paste0(WD, "/T8-12-16/raw_reads"), pattern = "_R2_001.fastq.gz", full.names = TRUE)) 
+
+sample.names <- sapply(strsplit(basename(forward.reads), "_"), `[`, 1)
+
+cutadapt("/usr/bin/cutadapt",
+         output.directory = paste0(WD, "/T456/primertrim_reads"),
+         forward.primer = "^GTGYCAGCMGCCGCGGTAA", 
+         reverse.primer = "^GACTACNVGGGTWTCTAAT", 
+         error.rate = 0.15,
+         minumum.overlap = 19,
+         clip.from.start.read1 = 0,
+         clip.from.start.read2 = 1,
+         maximum.N = 3,
+         discard.untrimmed = TRUE,
+         filter.pairs = "any",
+         log.files = TRUE,
+         R.cores = 4 )
+
+save.image(paste0(WD, "/dada2_output/stability-workspaceT456_seqrun1.RData"))
+```
+
+```{r T45_plot_quality_profile}
+forward.reads <- sort(list.files(paste0(WD, "/T456/primertrim_reads"), pattern = "_R1_cutadapt.fastq.gz", full.names = TRUE)) 
+reverse.reads <- sort(list.files(paste0(WD, "/T456/primertrim_reads"), pattern = "_R2_cutadapt.fastq.gz", full.names = TRUE)) 
+
+# Quality Profiles of samples
+plotQualityProfile(forward.reads[1:8])          
+plotQualityProfile(reverse.reads[1:8])
+```
+
+```{r T45_DADA2_fliterAndTrim}
+filtFs <- file.path(paste0(WD, "/T456/Qtrim_reads"), paste0(sample.names, "_R1_filtered.fastq.gz"))
+filtRs <- file.path(paste0(WD, "/T456/Qtrim_reads"), paste0(sample.names, "_R2_filtered.fastq.gz"))
+
+out <- filterAndTrim(forward.reads, filtFs, reverse.reads, filtRs, 
+                     truncLen = c(200, 150),
+                     maxN = c(0, 0), 
+                     maxEE = c(5, 5), 
+                     truncQ = c(2,2),
+                     rm.phix = TRUE,
+                     compress = TRUE, 
+                     multithread = FALSE,
+                     verbose = TRUE)
+
+save.image(paste0(WD, "/dada2_output/stability-workspaceT456_seqrun1.RData"))
+
+out %>% as.data.frame() %>%
+  dplyr::mutate(percent.surviving = round(reads.out/reads.in*100, 1))
+
+filtFs <- sort(list.files(paste0(WD, "/T456/Qtrim_reads/seq_run1"), pattern = "_R1_filtered.fastq.gz", full.names = TRUE)) 
+filtRs <- sort(list.files(paste0(WD, "/T456/Qtrim_reads/seq_run1"), pattern = "_R2_filtered.fastq.gz", full.names = TRUE)) 
+```
+
+```{r T45_DADA2_learnError}
+errF <- learnErrors(filtFs, multithread = TRUE, randomize = TRUE, nbases = 2e8, verbose = TRUE)
+save.image(paste0(WD, "/dada2_output/stability-workspaceT456_seqrun1.RData"))
+
+errR <- learnErrors(filtRs, multithread = TRUE, randomize = TRUE, nbases = 2e8, verbose = TRUE)
+save.image(paste0(WD, "/dada2_output/stability-workspaceT456_seqrun1.RData"))
+```
+
+```{r T45_DADA2_plotErrors}
+plotErrors(errR, nominalQ = TRUE)
+plotErrors(errF, nominalQ = TRUE)
+```
+
+```{r T45_DADA2_derepFastq}
+sample.names <- sapply(strsplit(basename(filtFs), "_"), `[`, 1)
+
+derepFs <- derepFastq(filtFs, verbose = T)
+names(derepFs) <- sample.names
+save.image(paste0(WD, "/dada2_output/stability-workspaceT456_seqrun1.RData"))
+derepRs <- derepFastq(filtRs, verbose = T)
+names(derepRs) <- sample.names
+save.image(paste0(WD, "/dada2_output/stability-workspaceT456_seqrun1.RData"))
+```
+
+```{r T45_DADA2_dada_sequence_error_correction}
+dadaFs <- dada(derepFs, err = errF, multithread = TRUE, verbose = T)
+save.image(paste0(WD, "/dada2_output/stability-workspaceT456_seqrun1.RData"))
+
+dadaRs <- dada(derepRs, err = errR, multithread = TRUE, verbose = T)
+save.image(paste0(WD, "/dada2_output/stability-workspaceT456_seqrun1.RData"))
+```
+
+```{r T45_DADA2_mergePairs}
+mergers <- mergePairs(dadaFs, derepFs, dadaRs, derepRs, verbose = TRUE) 
+save.image(paste0(WD, "/dada2_output/stability-workspaceT456_seqrun1.RData"))
+```
+
+```{r T45_DADA2_makeSequenceTable_removeBimera}
+seqtab <- makeSequenceTable(mergers)
+seqtab.nochim <- removeBimeraDenovo(seqtab, method = "consensus", multithread = TRUE, verbose = TRUE) 
+dim(seqtab.nochim)
+round(sum(seqtab.nochim)/sum(seqtab)*100, 2)
+table(nchar(getSequences(seqtab)))
+
+saveRDS(seqtab, paste0(WD, "/dada2_output/seqtab_T456run1.rds"))
+save.image(paste0(WD, "/dada2_output/stability-workspaceT456_seqrun1.RData"))
+```
+
+```{r T45_make_table_tracking_reads}
+getN <- function(x) sum(getUniques(x))
+if(nrow(filter(as.tibble(out), reads.in>0 & reads.out>0)) != nrow(as.tibble(out))) print("Some files didn't have reads.in or reads.out and have been drPped.")
+track <- cbind(filter(as.tibble(out), reads.in>0 & reads.out>0), sapply(dadaFs, getN), sapply(dadaRs, getN), sapply(mergers, getN), rowSums(seqtab.nochim))
+colnames(track) <- c("input", "filtered", "denoisedF", "denoisedR", "merged", "nonchimeric")
+track
+
+#two samples were drPped
+
+track %>%
+  rownames_to_column("ID") %>%
+  write.csv(., paste0(WD, "/dada2_output/track456run1.csv"),
+            quote = FALSE, row.names = FALSE)
+save.image(paste0(WD, "/dada2_output/stability-workspaceT456_seqrun1.RData"))
+```
+
+#Time points 4,5,6 corresponding to 8 week, 12 week, 16 week
+```{r T456_CUTADAPT_16S_primer_trimming}
+#seq_run3 completed on 09/24/23 VT6 is timepoint 6, or week 16
+#also includes remaining samples from weeks 8 and 12 that were reprocessed 
+#V4reads -- CUTADAPT
+
+#FWD: GTGYCAGCMGCCGCGGTAA
+#REV: G/GACTACNVGGGTWTCTAAT
+
+source(paste0(dirname(dirname(WD)), "/Resources/cutadapt_v4.R") )
+
+forward.reads <- sort(list.files(paste0(WD, "/T8-12-16/raw_reads/seq_run2"), pattern = "_R1_001.fastq.gz", full.names = TRUE)) 
+
+reverse.reads <- sort(list.files(paste0(WD, "/T8-12-16/raw_reads/seq_run2"), pattern = "_R2_001.fastq.gz", full.names = TRUE)) 
+
+sample.names <- sapply(strsplit(basename(forward.reads), "_"), `[`, 1)
+
+cutadapt("/usr/bin/cutadapt",
+         output.directory = paste0(WD, "/T456/primertrim_reads/seq_run2"),
+         forward.primer = "^GTGYCAGCMGCCGCGGTAA", 
+         reverse.primer = "^GACTACNVGGGTWTCTAAT", 
+         error.rate = 0.15,
+         minumum.overlap = 19,
+         clip.from.start.read1 = 0,
+         clip.from.start.read2 = 1,
+         maximum.N = 3,
+         discard.untrimmed = TRUE,
+         filter.pairs = "any",
+         log.files = TRUE,
+         R.cores = 4 )
+
+save.image(paste0(WD, "/dada2_output/stability-workspaceT456_seqrun2.RData"))
+```
+
+```{r T45_plot_quality_profile}
+forward.reads <- sort(list.files(paste0(WD, "/T456/primertrim_reads/seq_run2"), pattern = "_R1_cutadapt.fastq.gz", full.names = TRUE)) 
+reverse.reads <- sort(list.files(paste0(WD, "/T456/primertrim_reads/seq_run2"), pattern = "_R2_cutadapt.fastq.gz", full.names = TRUE)) 
+
+# Quality Profiles of samples
+plotQualityProfile(forward.reads[1:8])          
+plotQualityProfile(reverse.reads[1:8])
+```
+
+```{r T45_DADA2_fliterAndTrim}
+filtFs <- file.path(paste0(WD, "/T456/Qtrim_reads/seq_run2"), paste0(sample.names, "_R1_filtered.fastq.gz"))
+filtRs <- file.path(paste0(WD, "/T456/Qtrim_reads/seq_run2"), paste0(sample.names, "_R2_filtered.fastq.gz"))
+
+out <- filterAndTrim(forward.reads, filtFs, reverse.reads, filtRs, 
+                     truncLen = c(200, 150),
+                     maxN = c(0, 0), 
+                     maxEE = c(5, 5), 
+                     truncQ = c(2,2),
+                     rm.phix = TRUE,
+                     compress = TRUE, 
+                     multithread = FALSE,
+                     verbose = TRUE)
+
+save.image(paste0(WD, "/dada2_output/stability-workspaceT456_seqrun2.RData"))
+
+out %>% as.data.frame() %>%
+  dplyr::mutate(percent.surviving = round(reads.out/reads.in*100, 1))
+```
+
+```{r T45_DADA2_learnError}
+errF <- learnErrors(filtFs, multithread = TRUE, randomize = TRUE, nbases = 2e8, verbose = TRUE)
+save.image(paste0(WD, "/dada2_output/stability-workspaceT456_seqrun2.RData"))
+
+errR <- learnErrors(filtRs, multithread = TRUE, randomize = TRUE, nbases = 2e8, verbose = TRUE)
+save.image(paste0(WD, "/dada2_output/stability-workspaceT456_seqrun2.RData"))
+```
+
+```{r T45_DADA2_plotErrors}
+plotErrors(errR, nominalQ = TRUE)
+plotErrors(errF, nominalQ = TRUE)
+```
+
+```{r T45_DADA2_derepFastq}
+sample.names <- sapply(strsplit(basename(filtFs), "_"), `[`, 1)
+
+derepFs <- derepFastq(filtFs, verbose = T)
+names(derepFs) <- sample.names
+save.image(paste0(WD, "/dada2_output/stability-workspaceT456_seqrun2.RData"))
+derepRs <- derepFastq(filtRs, verbose = T)
+names(derepRs) <- sample.names
+save.image(paste0(WD, "/dada2_output/stability-workspaceT456_seqrun2.RData"))
+```
+
+```{r T45_DADA2_dada_sequence_error_correction}
+dadaFs <- dada(derepFs, err = errF, multithread = TRUE, verbose = T)
+save.image(paste0(WD, "/dada2_output/stability-workspaceT456_seqrun2.RData"))
+
+dadaRs <- dada(derepRs, err = errR, multithread = TRUE, verbose = T)
+save.image(paste0(WD, "/dada2_output/stability-workspaceT456_seqrun2.RData"))
+```
+
+```{r T45_DADA2_mergePairs}
+mergers <- mergePairs(dadaFs, derepFs, dadaRs, derepRs, verbose = TRUE) 
+save.image(paste0(WD, "/dada2_output/stability-workspaceT456_seqrun2.RData"))
+```
+
+```{r T45_DADA2_makeSequenceTable_removeBimera}
+seqtab <- makeSequenceTable(mergers)
+seqtab.nochim <- removeBimeraDenovo(seqtab, method = "consensus", multithread = TRUE, verbose = TRUE) 
+dim(seqtab.nochim)
+round(sum(seqtab.nochim)/sum(seqtab)*100, 2)
+table(nchar(getSequences(seqtab)))
+
+saveRDS(seqtab, paste0(WD, "/dada2_output/seqtab_T456run2.rds"))
+save.image(paste0(WD, "/dada2_output/stability-workspaceT456_seqrun2.RData"))
+```
+
+```{r T45_make_table_tracking_reads}
+getN <- function(x) sum(getUniques(x))
+if(nrow(filter(as.tibble(out), reads.in>0 & reads.out>0)) != nrow(as.tibble(out))) print("Some files didn't have reads.in or reads.out and have been drPped.")
+track <- cbind(filter(as.tibble(out), reads.in>0 & reads.out>0), sapply(dadaFs, getN), sapply(dadaRs, getN), sapply(mergers, getN), rowSums(seqtab.nochim))
+colnames(track) <- c("input", "filtered", "denoisedF", "denoisedR", "merged", "nonchimeric")
+track
+
+#two samples were drPped
+
+track %>%
+  rownames_to_column("ID") %>%
+  write.csv(., paste0(WD, "/dada2_output/track456run2.csv"),
+            quote = FALSE, row.names = FALSE)
+save.image(paste0(WD, "/dada2_output/stability-workspaceT456_seqrun2.RData"))
+```
+
+#T7 week 20
+```{r T7_CUTADAPT_16S_primer_trimming}
+#T7 SeqRun_4 completed on 10/20/23
+#V4reads -- CUTADAPT
+
+#FWD: GTGYCAGCMGCCGCGGTAA
+#REV: G/GACTACNVGGGTWTCTAAT
+
+source(paste0(dirname(dirname(WD)), "/Resources/cutadapt_v4.R") )
+
+forward.reads <- sort(list.files(paste0(WD, "/T20/raw_reads"), pattern = "_R1_001.fastq.gz", full.names = TRUE)) 
+
+reverse.reads <- sort(list.files(paste0(WD, "/T20/raw_reads"), pattern = "_R2_001.fastq.gz", full.names = TRUE)) 
+
+sample.names <- sapply(strsplit(basename(forward.reads), "_"), `[`, 1)
+
+cutadapt("/usr/bin/cutadapt",
+         output.directory = paste0(WD, "/T7/primertrim_reads"),
+         forward.primer = "^GTGYCAGCMGCCGCGGTAA", 
+         reverse.primer = "^GACTACNVGGGTWTCTAAT", 
+         error.rate = 0.15,
+         minumum.overlap = 19,
+         clip.from.start.read1 = 0,
+         clip.from.start.read2 = 1,
+         maximum.N = 3,
+         discard.untrimmed = TRUE,
+         filter.pairs = "any",
+         log.files = TRUE,
+         R.cores = 4 )
+
+save.image(paste0(WD, "/dada2_output/stability-workspaceT7.RData"))
+```
+
+```{r T7_plot_quality_profile}
+forward.reads <- sort(list.files(paste0(WD, "/T7/primertrim_reads"), pattern = "_R1_cutadapt.fastq.gz", full.names = TRUE)) 
+reverse.reads <- sort(list.files(paste0(WD, "/T7/primertrim_reads"), pattern = "_R2_cutadapt.fastq.gz", full.names = TRUE)) 
+
+# Quality Profiles of samples
+plotQualityProfile(forward.reads[1:8])          
+plotQualityProfile(reverse.reads[1:8])
+```
+
+```{r T7_DADA2_fliterAndTrim}
+filtFs <- file.path(paste0(WD, "/T7/Qtrim_reads"), paste0(sample.names, "_R1_filtered.fastq.gz"))
+filtRs <- file.path(paste0(WD, "/T7/Qtrim_reads"), paste0(sample.names, "_R2_filtered.fastq.gz"))
+
+out <- filterAndTrim(forward.reads, filtFs, reverse.reads, filtRs, 
+                     truncLen = c(200, 150),
+                     maxN = c(0, 0), 
+                     maxEE = c(5, 5), 
+                     truncQ = c(2,2),
+                     rm.phix = TRUE,
+                     compress = TRUE, 
+                     multithread = FALSE,
+                     verbose = TRUE)
+
+out %>% as.data.frame() %>%
+  dplyr::mutate(percent.surviving = round(reads.out/reads.in*100, 1))
+
+save.image(paste0(WD, "/dada2_output/stability-workspaceT7.RData"))
+```
+
+```{r T7_DADA2_learnError}
+errF <- learnErrors(filtFs, multithread = TRUE, randomize = TRUE, nbases = 2e8, verbose = TRUE)
+save.image(paste0(WD, "/dada2_output/stability-workspaceT7.RData"))
+
+errR <- learnErrors(filtRs, multithread = TRUE, randomize = TRUE, nbases = 2e8, verbose = TRUE)
+save.image(paste0(WD, "/dada2_output/stability-workspaceT7.RData"))
+```
+
+```{r T7_DADA2_plotErrors}
+plotErrors(errR, nominalQ = TRUE)
+plotErrors(errF, nominalQ = TRUE)
+```
+
+```{r T7_DADA2_derepFastq}
+filtFs <- sort(list.files(paste0(WD, "/T7/Qtrim_reads"), pattern = "_R1_filtered.fastq.gz", full.names = TRUE)) 
+filtRs <- sort(list.files(paste0(WD, "/T7/Qtrim_reads"), pattern = "_R2_filtered.fastq.gz", full.names = TRUE)) 
+
+sample.names <- sapply(strsplit(basename(filtFs), "_"), `[`, 1)
+
+derepFs <- derepFastq(filtFs, verbose = T)
+names(derepFs) <- sample.names
+save.image(paste0(WD, "/dada2_output/stability-workspaceT7.RData"))
+derepRs <- derepFastq(filtRs, verbose = T)
+names(derepRs) <- sample.names
+save.image(paste0(WD, "/dada2_output/stability-workspaceT7.RData"))
+```
+
+```{r T7_DADA2_dada_sequence_error_correction}
+dadaFs <- dada(derepFs, err = errF, multithread = TRUE, verbose = T)
+save.image(paste0(WD, "/dada2_output/stability-workspaceT7.RData"))
+
+dadaRs <- dada(derepRs, err = errR, multithread = TRUE, verbose = T)
+save.image(paste0(WD, "/dada2_output/stability-workspaceT7.RData"))
+```
+
+```{r T7_DADA2_mergePairs}
+mergers <- mergePairs(dadaFs, derepFs, dadaRs, derepRs, verbose = TRUE) 
+save.image(paste0(WD, "/dada2_output/stability-workspaceT7.RData"))
+```
+
+```{r T7_DADA2_makeSequenceTable_removeBimera}
+seqtab <- makeSequenceTable(mergers)
+seqtab.nochim <- removeBimeraDenovo(seqtab, method = "consensus", multithread = TRUE, verbose = TRUE) 
+dim(seqtab.nochim)
+round(sum(seqtab.nochim)/sum(seqtab)*100, 2)
+table(nchar(getSequences(seqtab)))
+
+saveRDS(seqtab, paste0(WD, "/dada2_output/seqtab_T7.rds"))
+save.image(paste0(WD, "/dada2_output/stability-workspaceT7.RData"))
+```
+
+```{r T7_make_table_tracking_reads}
+getN <- function(x) sum(getUniques(x))
+if(nrow(filter(as.tibble(out), reads.in>0 & reads.out>0)) != nrow(as.tibble(out))) print("Some files didn't have reads.in or reads.out and have been drPped.")
+track <- cbind(filter(as.tibble(out), reads.in>0 & reads.out>0), sapply(dadaFs, getN), sapply(dadaRs, getN), sapply(mergers, getN), rowSums(seqtab.nochim))
+colnames(track) <- c("input", "filtered", "denoisedF", "denoisedR", "merged", "nonchimeric")
+track
+
+track %>%
+  rownames_to_column("ID") %>%
+  write.csv(., paste0(WD, "/dada2_output/track7.csv"),
+            quote = FALSE, row.names = FALSE)
+
+save.image(paste0(WD, "/dada2_output/stability-workspaceT7.RData"))
+```
+
+#T8 week 24 (6 months)
+```{r T8_CUTADAPT_16S_primer_trimming}
+#SeqRun_5 completed on 11/23/23 timepoint 8, 24 weeks
+#V4reads -- CUTADAPT
+
+#FWD: GTGYCAGCMGCCGCGGTAA
+#REV: G/GACTACNVGGGTWTCTAAT
+
+source(paste0(dirname(dirname(WD)), "/Resources/cutadapt_v4.R") )
+
+forward.reads <- sort(list.files(paste0(WD, "/T24/raw_reads"), pattern = "_R1_001.fastq.gz", full.names = TRUE)) 
+
+reverse.reads <- sort(list.files(paste0(WD, "/T24/raw_reads"), pattern = "_R2_001.fastq.gz", full.names = TRUE)) 
+
+sample.names <- sapply(strsplit(basename(forward.reads), "_"), `[`, 1)
+
+cutadapt("/usr/bin/cutadapt",
+         output.directory = paste0(WD, "/T8/primertrim_reads"),
+         forward.primer = "^GTGYCAGCMGCCGCGGTAA", 
+         reverse.primer = "^GACTACNVGGGTWTCTAAT", 
+         error.rate = 0.15,
+         minumum.overlap = 19,
+         clip.from.start.read1 = 0,
+         clip.from.start.read2 = 1,
+         maximum.N = 3,
+         discard.untrimmed = TRUE,
+         filter.pairs = "any",
+         log.files = TRUE,
+         R.cores = 4 )
+
+save.image(paste0(WD, "/dada2_output/stability-workspaceT8.RData"))
+```
+
+```{r T8_plot_quality_profile}
+forward.reads <- sort(list.files(paste0(WD, "/T8/primertrim_reads"), pattern = "_R1_cutadapt.fastq.gz", full.names = TRUE)) 
+reverse.reads <- sort(list.files(paste0(WD, "/T8/primertrim_reads"), pattern = "_R2_cutadapt.fastq.gz", full.names = TRUE)) 
+
+# Quality Profiles of samples
+plotQualityProfile(forward.reads[1:8])          
+plotQualityProfile(reverse.reads[1:8])
+```
+
+```{r T8_DADA2_fliterAndTrim}
+filtFs <- file.path(paste0(WD, "/T8/Qtrim_reads"), paste0(sample.names, "_R1_filtered.fastq.gz"))
+filtRs <- file.path(paste0(WD, "/T8/Qtrim_reads"), paste0(sample.names, "_R2_filtered.fastq.gz"))
+
+out <- filterAndTrim(forward.reads, filtFs, reverse.reads, filtRs,
+                     truncLen = c(200, 150),
+                     maxN = c(0, 0), 
+                     maxEE = c(5, 5), 
+                     truncQ = c(2,2),
+                     rm.phix = TRUE,
+                     compress = TRUE, 
+                     multithread = FALSE,
+                     verbose = TRUE)
+
+save.image(paste0(WD, "/dada2_output/stability-workspaceT8.RData"))
+
+out %>% as.data.frame() %>%
+  dplyr::mutate(percent.surviving = round(reads.out/reads.in*100, 1))
+
+```
+
+```{r T8_DADA2_learnError}
+errF <- learnErrors(filtFs, multithread = TRUE, randomize = TRUE, nbases = 2e8, verbose = TRUE)
+save.image(paste0(WD, "/dada2_output/stability-workspaceT8.RData"))
+
+errR <- learnErrors(filtRs, multithread = TRUE, randomize = TRUE, nbases = 2e8, verbose = TRUE)
+save.image(paste0(WD, "/dada2_output/stability-workspaceT8.RData"))
+```
+
+```{r T8_DADA2_plotErrors}
+plotErrors(errR, nominalQ = TRUE)
+plotErrors(errF, nominalQ = TRUE)
+```
+
+```{r T8_DADA2_derepFastq}
+filtFs <- sort(list.files(paste0(WD, "/T8/Qtrim_reads"), pattern = "_R1_filtered.fastq.gz", full.names = TRUE)) 
+filtRs <- sort(list.files(paste0(WD, "/T8/Qtrim_reads"), pattern = "_R2_filtered.fastq.gz", full.names = TRUE)) 
+
+sample.names <- sapply(strsplit(basename(filtFs), "_"), `[`, 1)
+
+derepFs <- derepFastq(filtFs, verbose = T)
+names(derepFs) <- sample.names
+save.image(paste0(WD, "/dada2_output/stability-workspaceT8.RData"))
+derepRs <- derepFastq(filtRs, verbose = T)
+names(derepRs) <- sample.names
+save.image(paste0(WD, "/dada2_output/stability-workspaceT8.RData"))
+```
+
+```{r T8_DADA2_dada_sequence_error_correction}
+dadaFs <- dada(derepFs, err = errF, multithread = TRUE, verbose = T)
+save.image(paste0(WD, "/dada2_output/stability-workspaceT8.RData"))
+
+dadaRs <- dada(derepRs, err = errR, multithread = TRUE, verbose = T)
+save.image(paste0(WD, "/dada2_output/stability-workspaceT8.RData"))
+```
+
+```{r T8_DADA2_mergePairs}
+mergers <- mergePairs(dadaFs, derepFs, dadaRs, derepRs, verbose = TRUE) 
+save.image(paste0(WD, "/dada2_output/stability-workspaceT8.RData"))
+```
+
+```{r T8_DADA2_makeSequenceTable_removeBimera}
+seqtab <- makeSequenceTable(mergers)
+seqtab.nochim <- removeBimeraDenovo(seqtab, method = "consensus", multithread = TRUE, verbose = TRUE) 
+dim(seqtab.nochim)
+round(sum(seqtab.nochim)/sum(seqtab)*100, 2)
+table(nchar(getSequences(seqtab)))
+
+saveRDS(seqtab, paste0(WD, "/dada2_output/seqtab_T8.rds"))
+save.image(paste0(WD, "/dada2_output/stability-workspaceT8.RData"))
+```
+
+```{r T8_make_table_tracking_reads}
+getN <- function(x) sum(getUniques(x))
+if(nrow(filter(as.tibble(out), reads.in>0 & reads.out>0)) != nrow(as.tibble(out))) print("Some files didn't have reads.in or reads.out and have been drPped.")
+track <- cbind(filter(as.tibble(out), reads.in>0 & reads.out>0), sapply(dadaFs, getN), sapply(dadaRs, getN), sapply(mergers, getN), rowSums(seqtab.nochim))
+colnames(track) <- c("input", "filtered", "denoisedF", "denoisedR", "merged", "nonchimeric")
+track
+
+track %>%
+  rownames_to_column("ID") %>%
+  write.csv(., paste0(WD, "/dada2_output/track8.csv"),
+            quote = FALSE, row.names = FALSE)
+
+save.image(paste0(WD, "/dada2_output/stability-workspaceT8.RData"))
+```
+
+
+#combining stability reports into single asv and taxa table
+```{r}
+rm(list=ls()) #clear variables in work space
+WD <- getwd()
+
+seqtab_t123 <- readRDS(paste0(WD, "/dada2_output/seqtab123.rds"))
+seqtab_t456r1 <- readRDS(paste0(WD, "/dada2_output/seqtab_T456run1.rds"))
+seqtab_t456r2 <- readRDS(paste0(WD, "/dada2_output/seqtab_T456run2.rds"))
+seqtab_t7 <- readRDS(paste0(WD, "/dada2_output/seqtab_T7.rds"))
+seqtab_t8 <- readRDS(paste0(WD, "/dada2_output/seqtab_T8.rds"))
+
+row.names(seqtab_t8) <-c("OMNPOOL-1", "OMNPOOL-2", "OMNPOOL-3", "OMNPOOL-4", "OT8-25-1",  "OT8-25-2",  "OT8-25-3", "OT8-25-4",  "OT8-36-1",  "OT8-36-2",  "OT8-36-3",  "OT8-36-4",  "24wk-NEG",  "24wk-POS-1", "24wk-POS-2",  "24wk-POS-3", "VEGPOOL-1", "VEGPOOL-2", "VEGPOOL-3", "VEGPOOL-4", "VT8-11-1", "VT8-11-2",  "VT8-11-3",  "VT8-11-4", "VT8-36-1",  "VT8-36-2",  "VT8-36-3",  "VT8-36-4" )
+
+
+seqtab.stability <- mergeSequenceTables(seqtab_t123, seqtab_t456r1, seqtab_t456r2, seqtab_t7, seqtab_t8)
+
+seqtab.stability.nochim <- removeBimeraDenovo(seqtab.stability, method="consensus", multithread=TRUE, verbose = TRUE)
+
+asvtab.stability <- t(as.data.frame(seqtab.stability.nochim)) %>%
+  as.data.frame() %>%
+  tibble::rownames_to_column() %>%
+  dplyr::mutate(asvID = paste0("asv", 1:nrow(.))) %>%
+  plyr::rename(c("rowname" = "Sequence"))
+
+saveRDS(asvtab.stability, paste0(WD, "/dada2_output/asvtab_t12345678.rds"))
+
+seqinr::write.fasta(as.list(asvtab.stability$Sequence), paste0("asv", seq(nrow(asvtab.stability))), 
+                    paste0(WD, "/dada2_output/all_asv_seqst12345678.fasta"))
+
+save.image(paste0(WD, "/dada2_output/stability-workspace.RData"))
+```
+
+```{r}
+taxa <- assignTaxonomy(seqtab.stability.nochim, paste0(dirname(dirname(WD)), "/Resources/silva_nr99_v138_wSpecies_train_set.fa.gz"), 
+                       multithread=TRUE, tryRC = TRUE) %>%
+  as.data.frame() %>%
+  mutate(Sequence = rownames(.)) 
+  
+Taxa.tab <- full_join(taxa, asvtab.stability, by = "Sequence") %>%
+  gather(value = Count, key = Sample, -asvID, -Kingdom, -Phylum, -Class, -Order, -Family, -Genus, -Species, -Sequence) %>%
+  group_by(Sample) %>%
+  mutate(RelAbund = Count/sum(Count))
+
+write.table(Taxa.tab, paste0(dirname(dirname(WD)), "/Processed Data/Stability/taxa_tabt12345678.txt"),
+            quote = FALSE, row.names = FALSE, sep = "\t")
+
+
+save.image(paste0(WD, "/dada2_output/stability-workspace.RData"))
+```
+
+```{r}
+taxa.tab2 <- Taxa.tab %>%
+  select(-Kingdom, -Class, -Order, -Family, -Sequence, -Count) %>%
+  spread(value = "RelAbund", key = "Sample")
+
+write.table(taxa.tab2, paste0(dirname(dirname(WD)), "/Processed Data/Stability/taxa_tab2t12345678.txt"),
+            quote = FALSE, row.names = FALSE, sep = "\t")
+
+meta <- read_excel(paste0(WD, "/Meta_dataS.xlsx")) %>%
+  rename("Sample" = "MiSeq_ID")
+
+Taxa.tab.meta <- Taxa.tab %>%
+  left_join(meta, by = "Sample")
+
+write.table(Taxa.tab.meta, paste0(dirname(dirname(WD)), "/Processed Data/Stability/Taxa.tab3t12345678.meta.txt"),
+            quote = FALSE, row.names = FALSE, sep = "\t")
+
+save.image(paste0(WD, "/dada2_output/stability-workspace.RData"))
+```
+
+```{r uniqueASV_persample}
+#omnivore
+asv_unique_O <- Taxa.tab.meta %>%
+  select(Sample, Sequence, asvID, Count, Group) %>%
+  filter(Group == "Omnivore" & Count > 0) %>%
+  select(-Group) %>%
+  spread(value = "Count", key = "Sample")
+  
+counts_unique_O <- asv_unique_O %>%
+  summarise_all(~sum(!is.na(.))) %>%
+  gather(Column, NonNA_Count)
+
+Summary_Genus_O <- Taxa.tab.meta %>%
+  select(Sample, RelAbund, Group, Genus) %>%
+  filter(Group == "Omnivore" & RelAbund > 0) %>%
+  group_by(Sample, Genus) %>%
+  mutate(RelAbund_G = sum(RelAbund)) %>%
+  ungroup() %>%
+  group_by(Genus) %>%
+  mutate(AvgRelAbund_G = mean(RelAbund_G), MinRelAbund_G = min(RelAbund_G), MaxRelAbund_G= max(RelAbund_G)) %>%
+  select(Genus, AvgRelAbund_G, MinRelAbund_G, MaxRelAbund_G) %>%
+  distinct(Genus, .keep_all = T)
+
+Summary_Asv_O <- Taxa.tab.meta %>%
+  select(Sample, Sequence, asvID, RelAbund, Group, Genus) %>%
+  filter(Group == "Omnivore" & RelAbund > 0 & Genus == "Collinsella") %>%
+  group_by(asvID) %>%
+  mutate(AvgRelAbund = mean(RelAbund), MinRelAbund = min(RelAbund), MaxRelAbund= max(RelAbund)) %>%
+  select(Sequence, asvID, Genus, AvgRelAbund, MinRelAbund, MaxRelAbund) %>%
+  distinct(asvID, .keep_all = T)
+
+write.table(counts_unique_O, paste0(WD, "/dada2_output/counts_unique_O.txt"),
+            quote = FALSE, row.names = FALSE, sep = "\t")
+write.table(Summary_Asv_O, paste0(WD, "/dada2_output/Summary_Asv_O.txt"),
+            quote = FALSE, row.names = FALSE, sep = "\t")
+write.table(Summary_Genus_O, paste0(WD, "/dada2_output/Summary_Genus_O.txt"),
+            quote = FALSE, row.names = FALSE, sep = "\t")
+
+#vegetarian
+asv_unique_V <- Taxa.tab.meta %>%
+  select(Sample, Sequence, asvID, Count, Group) %>%
+  filter(Group == "Vegetarian" & Count > 0) %>%
+  select(-Group) %>%
+  spread(value = "Count", key = "Sample")
+
+counts_unique_V <- asv_unique_V %>%
+  summarise_all(~sum(!is.na(.))) %>%
+  gather(Column, NonNA_Count)
+
+Summary_Asv_V <- Taxa.tab.meta %>%
+  select(Sample, Sequence, asvID, RelAbund, Group, Genus) %>%
+  filter(Group == "Vegetarian" & RelAbund > 0) %>%
+  group_by(asvID) %>%
+  mutate(AvgRelAbund = mean(RelAbund), MinRelAbund = min(RelAbund), MaxRelAbund = max(RelAbund)) %>%
+  select(asvID, Sequence, Genus, AvgRelAbund, MinRelAbund, MaxRelAbund) %>%
+  distinct(asvID, .keep_all = T)
+
+Summary_Genus_V <- Taxa.tab.meta %>%
+  select(Sample, RelAbund, Group, Genus) %>%
+  filter(Group == "Vegetarian" & RelAbund > 0) %>%
+  group_by(Sample, Genus) %>%
+  mutate(RelAbund_G = sum(RelAbund)) %>%
+  ungroup() %>%
+  group_by(Genus) %>%
+  mutate(AvgRelAbund_G = mean(RelAbund_G), MinRelAbund_G = min(RelAbund_G), MaxRelAbund_G= max(RelAbund_G)) %>%
+  select(Genus, AvgRelAbund_G, MinRelAbund_G, MaxRelAbund_G) %>%
+  distinct(Genus, .keep_all = T)
+
+write.table(counts_unique_V, paste0(WD, "/dada2_output/counts_unique_V.txt"),
+            quote = FALSE, row.names = FALSE, sep = "\t")
+write.table(Summary_Asv_V, paste0(WD, "/dada2_output/Summary_Asv_V.txt"),
+            quote = FALSE, row.names = FALSE, sep = "\t")
+write.table(Summary_Genus_V, paste0(WD, "/dada2_output/Summary_Genus_V.txt"),
+            quote = FALSE, row.names = FALSE, sep = "\t")
+
+Summary_Genus <- full_join(Summary_Genus_O, Summary_Genus_V, by = "Genus") %>%
+  rename(OmniAvgRelAbund_G = AvgRelAbund_G.x, OmniMinRelAbund_G = MinRelAbund_G.x, OmniMaxRelAbund_G = MaxRelAbund_G.x, 
+         VegAvgRelAbund_G = AvgRelAbund_G.y, VegMinRelAbund_G = MinRelAbund_G.y, VegMaxRelAbund_G = MaxRelAbund_G.y) %>%
+  replace_na(list(Genus = 'Unclassified')) %>%
+  replace(is.na(.), 0)
+
+write.table(Summary_Genus, paste0(WD, "/dada2_output/Summary_Genus.txt"),
+            quote = FALSE, row.names = FALSE, sep = "\t")
+
+#negative control
+asv_unique_Neg <- Taxa.tab.meta %>%
+  select(Sample, Sequence, asvID, Count, Group) %>%
+  filter(Group == "water" & Count > 0) %>%
+  select(-Group) %>%
+  spread(value = "Count", key = "Sample")
+
+counts_unique_Neg <- asv_unique_Neg %>%
+  summarise_all(~sum(!is.na(.))) %>%
+  gather(Column, NonNA_Count)
+
+#omniPool
+asv_unique_OP <- Taxa.tab.meta %>%
+  select(Sample, Sequence, asvID, Count, Group) %>%
+  filter(Group == "OmniPool" & Count > 0) %>%
+  select(-Group) %>%
+  spread(value = "Count", key = "Sample")
+
+counts_unique_OP <- asv_unique_OP %>%
+  summarise_all(~sum(!is.na(.))) %>%
+  gather(Column, NonNA_Count)
+
+Summary_Asv_OP <- Taxa.tab.meta %>%
+  select(Sample, Sequence, asvID, RelAbund, Group, Genus) %>%
+  filter(Group == "OmniPool" & RelAbund > 0) %>%
+  group_by(asvID) %>%
+  mutate(AvgRelAbund = mean(RelAbund), MinRelAbund = min(RelAbund), MaxRelAbund = max(RelAbund)) %>%
+  select(asvID, Sequence, Genus, AvgRelAbund, MinRelAbund, MaxRelAbund) %>%
+  distinct(asvID, .keep_all = T)
+
+write.table(counts_unique_OP, paste0(WD, "/dada2_output/counts_unique_OP.txt"),
+            quote = FALSE, row.names = FALSE, sep = "\t")
+write.table(Summary_Asv_OP, paste0(WD, "/dada2_output/Summary_Asv_OP.txt"),
+            quote = FALSE, row.names = FALSE, sep = "\t")
+
+#vegPool
+asv_unique_VP <- Taxa.tab.meta %>%
+  select(Sample, Sequence, asvID, Count, Group) %>%
+  filter(Group == "VegPool" & Count > 0) %>%
+  select(-Group) %>%
+  spread(value = "Count", key = "Sample")
+
+counts_unique_VP <- asv_unique_VP %>%
+  summarise_all(~sum(!is.na(.))) %>%
+  gather(Column, NonNA_Count)
+
+Summary_Asv_VP <- Taxa.tab.meta %>%
+  select(Sample, Sequence, asvID, RelAbund, Group, Genus) %>%
+  filter(Group == "VegPool" & RelAbund > 0) %>%
+  group_by(asvID) %>%
+  mutate(AvgRelAbund = mean(RelAbund), MinRelAbund = min(RelAbund), MaxRelAbund = max(RelAbund)) %>%
+  select(asvID, Genus, Sequence, AvgRelAbund, MinRelAbund, MaxRelAbund) %>%
+  distinct(asvID, .keep_all = T)
+
+write.table(counts_unique_VP, paste0(WD, "/dada2_output/counts_unique_VP.txt"),
+            quote = FALSE, row.names = FALSE, sep = "\t")
+write.table(Summary_Asv_VP, paste0(WD, "/dada2_output/Summary_Asv_VP.txt"),
+            quote = FALSE, row.names = FALSE, sep = "\t")
+
+#zymoControl
+asv_unique_Zymo <- Taxa.tab.meta %>%
+  select(Sample, Sequence, asvID, Count, Group) %>%
+  filter(Group == "zymo" & Count > 0) %>%
+  select(-Group) %>%
+  spread(value = "Count", key = "Sample")
+
+counts_unique_Zymo <- asv_unique_Zymo %>%
+  summarise_all(~sum(!is.na(.))) %>%
+  gather(Column, NonNA_Count)
+
+Summary_Asv_Zymo <- Taxa.tab.meta %>%
+  select(Sample, Sequence, asvID, RelAbund, Group, Genus) %>%
+  filter(Group == "zymo" & RelAbund > 0) %>%
+  group_by(asvID) %>%
+  mutate(AvgRelAbund = mean(RelAbund), MinRelAbund = min(RelAbund), MaxRelAbund = max(RelAbund)) %>%
+  select(asvID, Sequence, Genus, AvgRelAbund, MinRelAbund, MaxRelAbund) %>%
+  distinct(asvID, .keep_all = T)
+
+write.table(counts_unique_Zymo, paste0(WD, "/dada2_output/counts_unique_Zymo.txt"),
+            quote = FALSE, row.names = FALSE, sep = "\t")
+write.table(Summary_Asv_Zymo, paste0(WD, "/dada2_output/Summary_Asv_Zymo.txt"),
+            quote = FALSE, row.names = FALSE, sep = "\t")
+
+
+print(counts_unique_O)
+print(Summary_Asv_O)
+print(Summary_Genus_O)
+
+print(counts_unique_V)
+print(Summary_Asv_V)
+print(Summary_Genus_V)
+
+print(Summary_Genus)
+
+print(counts_unique_Neg)
+print(counts_unique_OP)
+print(Summary_Asv_OP)
+print(counts_unique_VP)
+print(Summary_Asv_VP)
+print(Summary_Asv_Zymo)
+print(counts_unique_Zymo)
+```
+
+```{r barplot_RA}
+S_level_order <- c("O49", "O50", "O51", "O52", "O53", "O54", "O55", "O56", "O57", "O58","O59","O60",
+                   "O61", "O62", "O63", "O64", "O65", "O66", "O67", "O68", "O69", "O70",
+                   "O71", "O72", "O73", "O74", "O75", "O76", "O77", "O78", "O79", "O80",
+                   "O81", "O82", "O83", "O84", "O85", "O86", "O87", "O88", "O89", "O90",
+                   "O91", "O92", "O93", "O94", "O95", "O96", "O97", "O98", "O99", "O100",
+                   "O101","O102","O103","O104","O105","O106","O107","O108","O109","O110",
+                   "O111","O112","O113","O114","O115","O116","O117","O118","O119","O120",
+                   "O121","O122","O123","O124","O125","O126","O127","O128",
+                   "V49", "V50", "V51", "V52", "V53", "V54", "V55", "V56", "V57", "V58","V59","V60",
+                   "V61", "V62", "V63", "V64", "V65", "V66", "V67", "V68", "V69", "V70",
+                   "V71", "V72", "V73", "V74", "V75", "V76", "V77", "V78", "V79", "V80",
+                   "V81", "V82", "V83", "V84", "V85", "V86", "V87", "V88", "V89", "V90",
+                   "V91", "V92", "V93", "V94", "V95", "V96", "V97", "V98", "V99", "V100",
+                   "V101","V102","V103","V104","V105","V106","V107","V108","V109","V110",
+                   "V111","V112")
+
+pal_40 <- c("#1F78C8" ,"#ff0000", "#33a02c" ,"#6A33C2" ,"#ff7f00", 
+            "#565656","#FFD700","#a6cee3", "#FB6496" ,"#b2df8a", 
+            "#CAB2D6","#FDBF6F","#0000FF","#EEE685", "#C8308C", 
+            "#FF83FA" ,"#C814FA", "#999999" , "#36648B", "#00E2E5",
+            "#00FF00", "#778B00", "#BEBE00","#8B3B00","#A52A3C" ,
+            "#F0A0FF" ,"#0075DC", "#993F00" ,"#4C005C","#191919", 
+            "#005C31", "#2BCE48" ,"#FFCC99" ,"#808080", "#94FFB5",
+            "#FFC300", "#C70039", "#900C3F", "#581845","#DAF7A6")
+
+RelAbund_plot <- Taxa.tab.meta %>%
+  filter(Group == "Omnivore" | Group == "Vegetarian") %>%
+  group_by(Group, Sample, Genus)%>%
+  mutate(RelAbund_G = sum(RelAbund)) %>%
+  ungroup() %>%
+  group_by(Group, Genus)%>%
+  mutate(AvgRelAbund = mean(RelAbund_G)) %>%
+  filter(AvgRelAbund >= 0.0056) %>%
+  replace_na(list(Genus = 'Unclassified')) %>%
+  ungroup() %>%
+  group_by(Sample) %>%
+  ggplot(aes(x=factor(Sample_ID, level =S_level_order), y=RelAbund, fill = Genus)) +
+  geom_bar(stat = "identity", color = "black", size = .1) +
+  scale_fill_manual(values = pal_40) +
+  scale_y_continuous(labels = scales::percent, limits = c(0,1)) +
+  labs(x = "Sample", y = "Relative Abundance") +
+  theme(axis.text.x=element_text(angle=90,hjust=.75, vjust = .5, size = 6)) +
+  facet_wrap(Group~., scales = "free_x")
+
+print(RelAbund_plot)
+
+ggsave(paste0(WD, "/dada2_output/RelAbund_plot.png"), RelAbund_plot, width = 15, height = 8, units = "in") 
+```
+
+```{r barplot_controldata}
+OP_level_order <- c("OP1", "OP2", "OP3", "OP4", "OP5", "OP6", "OP7", "OP8", "OP9", "OP10",
+                   "OP11", "OP12", "OP13", "OP14", "OP15", "OP16", "OP17", "OP18", "OP19", "OP20",
+                   "OP21", "OP22", "OP23", "OP24", "OP25", "OP26", "OP27", "OP28", 
+                   "VP1", "VP2", "VP3", "VP4", "VP5", "VP6", "VP7", "VP8", "VP9", "VP10",
+                   "VP11", "VP12", "VP13", "VP14", "VP15", "VP16", "VP17", "VP18", "VP19", "VP20",
+                   "VP21", "VP22", "VP23", "VP24", "VP25", "VP26", "VP27", "VP28")
+
+Taxa.tab.meta %>%
+  filter(Group == "OmniPool" | Group == "VegPool") %>%
+  group_by(Group, Genus)%>%
+  mutate(AvgRelAbund = mean(RelAbund)) %>%
+  filter(AvgRelAbund >= .0008) %>%
+  group_by(Sample) %>%
+  ggplot(aes(x=factor(Sample_ID, level =OP_level_order), y=RelAbund, fill = Genus)) +
+  geom_bar(stat = "identity", color = "black", size = .1) +
+  scale_fill_manual(values = pal_40) +
+  scale_y_continuous(labels = scales::percent, limits = c(0,1)) +
+  labs(x = "Sample", y = "Relative Abundance") +
+  theme(axis.text.x=element_text(angle=90,hjust=.75, vjust = .5, size = 6)) +
+  facet_wrap(Group~., scales = "free_x")
+
+
+Zymo_level_order <- c("P1", "P2", "P3", "P4", "P5", "P6", "P7", "P8", "P9", "P10",
+                   "P11", "P12", "P13", "P14", "P15", "P16", "P17", "P18", "P19", "P20",
+                   "P21", "P22", "P23", "P24", "P25", "P26", "P27", "P28")
+Taxa.tab.meta %>%
+  filter(Group == "zymo") %>%
+  group_by(Group, Genus)%>%
+  mutate(AvgRelAbund = mean(RelAbund)) %>%
+  filter(AvgRelAbund >= .00075) %>%
+  group_by(Sample) %>%
+  ggplot(aes(x=factor(Sample_ID, level =Zymo_level_order), y=RelAbund, fill = Genus)) +
+  geom_bar(stat = "identity", color = "black", size = .1) +
+  scale_fill_manual(values = pal_40) +
+  scale_y_continuous(labels = scales::percent, limits = c(0,1)) +
+  labs(x = "Sample", y = "Relative Abundance") +
+  theme(axis.text.x=element_text(angle=90,hjust=.75, vjust = .5, size = 6)) +
+  facet_wrap(Group~., scales = "free_x")
+
+```
+
+```{r final_save}
+save.image(paste0(WD, "/dada2_output/stability-workspace.RData"))
+```
+
+
+
+
